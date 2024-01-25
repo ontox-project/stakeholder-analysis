@@ -1,0 +1,311 @@
+---
+title: "data-analysis"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{data-analysis}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  error = FALSE,
+  message = FALSE)
+```
+
+```{r}
+library(stakeholderAnalysis)
+library(tidyverse)
+library(readxl)
+library(pheatmap)
+library(tidymodels)
+```
+
+## Data
+
+### Questionnaire
+
+```{r}
+data_stakeholders_clean <- stakeholderAnalysis::data_stakeholders_clean
+```
+
+### Clusters
+
+```{r}
+data_clusters <- stakeholderAnalysis::data_clusters
+
+```
+
+
+## Select numeric columns
+
+```{r}
+map(
+  data_stakeholders_clean,
+  safely(as.numeric)
+  ) |> transpose() |>
+  pluck("result") |>
+  as_tibble() -> data_numeric
+
+## text columns
+col_ind <- map_df(
+  data_stakeholders_clean,
+  as.integer
+)
+
+not_any_na <- function(x) all(!is.na(x))
+
+data_text_ind <- map_lgl(
+  col_ind,
+ not_any_na
+)
+
+data_text <- data_stakeholders_clean[ , !data_text_ind]
+
+## remove all NA columns
+not_any_na <- function(x) all(!is.na(x))
+
+data_numeric <- data_numeric |>
+  select(where(not_any_na))
+
+## convert all to counts
+#map_df(
+#  data_numeric,
+#  as.numeric
+#)
+
+## add name of org
+data_numeric$type_org <- data_stakeholders_clean$organis
+```
+
+## Principal Component analysis
+
+```{r}
+theme_set(theme_bw(16))
+```
+
+```{r}
+#data_numeric$label <- data_stakeholders_clean$organis
+
+pca_recipe <- recipe(~., data = data_numeric)
+
+pca_trans <- pca_recipe %>%
+  # center the data
+  step_center(all_numeric()) %>%
+  # center the data
+  step_scale(all_numeric()) %>%
+  # pca on all numeric variables
+  step_pca(all_numeric())
+
+pca_estimates <- prep(pca_trans)
+
+# std deviation
+sdev <- pca_estimates$steps[[3]]$res$sdev
+percent_variation <- sdev^2 / sum(sdev^2)
+var_df <- data.frame(PC=paste0("PC",1:length(sdev)),
+                     var_explained=percent_variation,
+                     stringsAsFactors = FALSE)
+
+var_df %>%
+  mutate(PC = fct_inorder(PC)) %>%
+  ggplot(aes(x=PC,y=var_explained)) + geom_col()
+
+juice(pca_estimates) %>%
+  ggplot(aes(PC1, PC2)) +
+  geom_point(aes(color = type_org), size = 5) +
+  labs(title="PCA from tidymodels")
+```
+
+## Create tidy, long format
+
+```{r}
+data_numeric_tidy <- data_numeric |>
+  pivot_longer(cols = -c(type_org), values_to = "score", names_to = "question")
+```
+
+## Add clusters
+
+```{r}
+data_numeric_tidy <- data_numeric_tidy |>
+  separate(question, into = c("question", "sub", "trace"), remove = FALSE) |>
+  mutate(
+    question = map(
+      question,
+      str_replace_all,
+      pattern = "x",
+      replacement = ""
+      )
+    ) 
+
+data_numeric_tidy$question <- data_numeric_tidy$question |> unlist() |> as.integer()
+
+data_clusters$question <- data_clusters$question |>
+  as.integer()
+
+data_numeric_tidy_clusters <- left_join(
+  data_numeric_tidy, 
+  data_clusters
+  )
+
+```
+
+## Exploratory plots
+
+```{r}
+data_numeric_tidy_clusters |>
+  ggplot(
+    aes(
+      x = question,
+      y = score)
+  ) + 
+  geom_point(aes(colour = type_org), position = "jitter") +
+  xlab("Question number") +
+  ylab(NULL) + toolboxr::rotate_axis_labels("x", 90)
+
+data_numeric_tidy_clusters |>
+  ggplot(
+    aes(
+      x = question,
+      y = score)
+  ) + 
+  geom_point(aes(colour = type_org), position = "jitter") +
+  xlab("Question number") +
+  ylab(NULL) + toolboxr::rotate_axis_labels("x", 90) +
+  facet_wrap(~cluster_name)
+
+```
+
+## Aggregate organization types
+
+For some organization types there are only a few observations. Let's aggregate the organization types into 4 subtypes:
+
+-   Government & Policy
+-   Industry
+-   NGO
+-   Academia
+
+```{r}
+names(data_numeric_tidy_clusters)
+
+data_numeric_tidy_clusters |> 
+  group_by(type_org) |>
+  tally()
+
+
+data_numeric_tidy_clusters <- data_numeric_tidy_clusters |>
+  mutate(
+  type_collapsed = fct_collapse(type_org,
+  `Government & Policy` = c("EU Commision", "EU agency", "Regulatory authority"),
+  Academia = c("Policymakers - academia"),
+))
+
+
+data_numeric_tidy_clusters |> 
+  group_by(type_collapsed) |>
+  tally()
+
+```
+
+## Polar plots
+```{r}
+
+data_numeric_tidy_clusters |>
+  group_by(question, cluster_name, cluster_id) |>
+  summarise(
+    median_score = median(score, na.rm = TRUE),
+    sd = sd(score, na.rm = TRUE)) |>
+  ggplot(
+    aes(
+      x = reorder(as_factor(question), cluster_id),
+      y = median_score)
+  ) + 
+  geom_bar(
+    aes(
+      fill = cluster_name), 
+    stat="identity", 
+    color="black", 
+    position = "dodge") +
+  geom_errorbar(
+    aes(ymin=median_score-sd, 
+        ymax=median_score+sd),
+    width=.2,
+    position=position_dodge(.9)) + 
+  xlab("Question number") +
+  ylab(NULL) + 
+  toolboxr::rotate_axis_labels("x", 90) +
+  ggtitle("Overall average score per question category")  -> p
+
+p
+
+p + 
+  coord_polar() +
+  theme_minimal() +
+  # Remove legend, axes, text, and tick marks
+  theme(
+   # legend.position = "none",
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_text(face = "bold"),
+    plot.title = element_text(size = 24, face = "bold"),
+    plot.subtitle = element_text(size = 12) 
+  ) -> pp
+
+pp
+```
+
+
+## Polar plot per organization category
+
+```{r}
+data_nested <- data_numeric_tidy_clusters |>
+  group_by(type_collapsed) |>
+  nest()
+
+
+data_nested <- data_nested |>
+  mutate(polar_org = map2(
+    data,
+    type_collapsed,
+    plot_polar,
+    show.legend = FALSE
+  ))
+
+data_nested$polar_org
+```
+
+```{r, out.width=800}
+## panel
+cowplot::plot_grid(
+  data_nested$polar_org[[1]],
+  data_nested$polar_org[[2]],
+  data_nested$polar_org[[3]],
+  data_nested$polar_org[[4]],
+  nrow = 2
+)
+
+
+```
+
+## Heatmap - per org_type
+
+```{r, out.width=800}
+data_numeric_num <- data_numeric |>
+  select(-c(type_org)) |>
+  as.matrix() -> data_mtrx
+
+row.names(data_mtrx) <- data_numeric$type_org
+pheatmap(data_mtrx)
+
+```
+
